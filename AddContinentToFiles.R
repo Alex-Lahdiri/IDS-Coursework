@@ -1,0 +1,30 @@
+library(tidyverse)
+#Add continents to file gdp_per_capita_worldbank
+Data_of_Continents <- read.csv("/Users/anna/Downloads/data sets/continents-according-to-our-world-in-data.csv")
+gdp_per_capita_worldbank <- read.csv("/Users/anna/Downloads/data sets/gdp-per-capita-worldbank.csv")
+
+GDPperCapita_with_continent <- gdp_per_capita_worldbank %>%
+  left_join(
+    Data_of_Continent %>% select(Code, Continent),
+    by = "Code"  
+  )
+head(GDPperCapita_with_continent)
+write.csv(
+  GDPperCapita_with_continent,
+  file = "/Users/anna/Downloads/data sets/GDPperCapita_with_continent.csv",
+  row.names = FALSE 
+)
+
+#Add contunents to file youth_not_in_education_employment_training
+youth_not_in_education_employment_training <- read.csv("/Users/anna/Downloads/data sets/youth-not-in-education-employment-training.csv")
+Youth_not_in_education_employment_training_with_continent <- youth_not_in_education_employment_training %>%
+  left_join(
+    Data_of_Continent %>% select(Code, Continent),  
+    by = "Code"  
+  )
+head(Youth_not_in_education_employment_training_with_continent)
+write.csv(
+  Youth_not_in_education_employment_training_with_continent,
+  file = "/Users/anna/Downloads/data sets/Youth_not_in_education_employment_training_with_continent.csv", 
+  row.names = FALSE 
+)
