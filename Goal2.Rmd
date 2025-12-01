@@ -1,13 +1,3 @@
----
-title: "Goal2"
-output: html_document
-date: "2025-12-01"
----
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
-
 ## R Markdown
 
 ```{r}
