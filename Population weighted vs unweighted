@@ -1,0 +1,138 @@
+# Load required packages
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readr)
+
+
+# Read the data
+gdp_data <- read_csv("data sets/gdp-per-capita-worldbank.csv", show_col_types = FALSE)
+continents <- read_csv("data sets/continents-according-to-our-world-in-data.csv", show_col_types = FALSE)
+
+# Clean column names
+colnames(gdp_data) <- c("Entity", "Code", "Year", "GDP_per_capita")
+
+# Merge with continent data
+data <- left_join(gdp_data, continents[, c("Code", "Continent")], by = "Code")
+
+# Define Least Developed Countries (LDCs)
+ldcs <- c('Afghanistan', 'Angola', 'Bangladesh', 'Benin', 'Bhutan', 'Burkina Faso',
+          'Burundi', 'Cambodia', 'Central African Republic', 'Chad', 'Comoros',
+          'Democratic Republic of Congo', 'Djibouti', 'Eritrea', 'Ethiopia',
+          'Gambia', 'Guinea', 'Guinea-Bissau', 'Haiti', 'Kiribati', 'Laos',
+          'Lesotho', 'Liberia', 'Madagascar', 'Malawi', 'Mali', 'Mauritania',
+          'Mozambique', 'Myanmar', 'Nepal', 'Niger', 'Rwanda', 'Sao Tome and Principe',
+          'Senegal', 'Sierra Leone', 'Solomon Islands', 'Somalia', 'South Sudan',
+          'Sudan', 'Tanzania', 'Timor', 'Togo', 'Tuvalu', 'Uganda', 'Yemen', 'Zambia')
+
+# Mark LDCs
+data$Is_LDC <- data$Entity %in% ldcs
+
+# Population data (2020 estimates, in millions)
+pop_data <- data.frame(
+  Entity = c('Afghanistan', 'Angola', 'Bangladesh', 'Benin', 'Bhutan', 'Burkina Faso',
+             'Burundi', 'Cambodia', 'Central African Republic', 'Chad', 'Comoros',
+             'Democratic Republic of Congo', 'Djibouti', 'Eritrea', 'Ethiopia',
+             'Gambia', 'Guinea', 'Guinea-Bissau', 'Haiti', 'Kiribati', 'Laos',
+             'Lesotho', 'Liberia', 'Madagascar', 'Malawi', 'Mali', 'Mauritania',
+             'Mozambique', 'Myanmar', 'Nepal', 'Niger', 'Rwanda', 'Sao Tome and Principe',
+             'Senegal', 'Sierra Leone', 'Solomon Islands', 'Somalia', 'South Sudan',
+             'Sudan', 'Tanzania', 'Timor', 'Togo', 'Tuvalu', 'Uganda', 'Yemen', 'Zambia'),
+  Population_2020 = c(38.9, 32.9, 164.7, 12.1, 0.8, 20.9,
+                      11.9, 16.7, 4.8, 16.4, 0.9,
+                      89.6, 1.0, 3.5, 115.0,
+                      2.4, 13.1, 2.0, 11.4, 0.12, 7.3,
+                      2.1, 5.1, 27.7, 19.1, 20.3, 4.7,
+                      31.3, 54.4, 29.1, 24.2, 13.0, 0.22,
+                      16.7, 8.0, 0.69, 15.9, 11.2,
+                      43.8, 59.7, 1.3, 8.3, 0.011, 45.7, 29.8, 18.4)
+)
+
+# Expand population for all years (simple growth model)
+pop_expanded <- pop_data %>%
+  crossing(Year = 2000:2023) %>%
+  mutate(
+    years_from_2020 = Year - 2020,
+    Population = Population_2020 * (1 + years_from_2020 * 0.025) * 1e6  # Convert to actual numbers
+  )
+
+# Merge population with main data
+data <- data %>%
+  left_join(pop_expanded %>% select(Entity, Year, Population), by = c("Entity", "Year"))
+
+# Calculate GDP growth rates
+data <- data %>%
+  arrange(Entity, Year) %>%
+  group_by(Entity) %>%
+  mutate(GDP_growth = (GDP_per_capita / lag(GDP_per_capita) - 1) * 100) %>%
+  ungroup()
+
+# Filter for recent data
+recent_data <- data %>% filter(Year >= 2000, !is.na(Population))
+
+# Calculate both weighted and unweighted averages by year for LDCs
+comparison_data <- recent_data %>%
+  filter(!is.na(GDP_growth), !is.na(Population), Is_LDC == TRUE) %>%
+  group_by(Year) %>%
+  summarise(
+    Unweighted_Avg = mean(GDP_growth, na.rm = TRUE),
+    Weighted_Avg = weighted.mean(GDP_growth, Population, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Reshape data for plotting
+ldc_comparison <- comparison_data %>%
+  pivot_longer(cols = c(Unweighted_Avg, Weighted_Avg),
+               names_to = "Method", 
+               values_to = "Growth_Rate") %>%
+  mutate(Method = ifelse(Method == "Unweighted_Avg", 
+                         "Unweighted (Equal Weight)", 
+                         "Population-Weighted"))
+
+# Create the plot
+p1 <- ggplot(ldc_comparison, aes(x = Year, y = Growth_Rate, 
+                                 color = Method, linetype = Method)) +
+  geom_line(size = 1.5) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 7, linetype = "dashed", 
+             color = "darkgreen", size = 1.2) +
+  geom_hline(yintercept = 0, linetype = "solid", 
+             color = "black", size = 0.5, alpha = 0.5) +
+  annotate("text", x = max(ldc_comparison$Year) - 1, y = 7.5, 
+           label = "SDG Target: 7%", color = "darkgreen", 
+           fontface = "bold", size = 4) +
+  scale_color_manual(values = c("Unweighted (Equal Weight)" = "#e74c3c", 
+                                "Population-Weighted" = "#2c3e50")) +
+  scale_linetype_manual(values = c("Unweighted (Equal Weight)" = "dashed",
+                                   "Population-Weighted" = "solid")) +
+  scale_y_continuous(breaks = seq(-6, 12, 2), limits = c(-6, 12)) +
+  labs(title = "Impact of Population Weighting on LDC Growth Estimates",
+       subtitle = "Weighted approach gives more influence to populous countries like Bangladesh & Ethiopia",
+       x = "Year",
+       y = "Average GDP Growth Rate (%)",
+       color = "Calculation Method",
+       linetype = "Calculation Method") +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5, color = "gray40"),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title = element_text(face = "bold")
+  )
+
+# Display the plot
+print(p1)
+
+# Save the plot
+ggsave("weighted_01_comparison.png", p1, 
+       width = 12, height = 8, dpi = 300)
+
+# Print summary statistics
+cat("\n=== SUMMARY STATISTICS (2015-2023) ===\n")
+recent_comparison <- comparison_data %>% filter(Year >= 2015)
+cat(sprintf("Unweighted Average:  %.2f%%\n", mean(recent_comparison$Unweighted_Avg)))
+cat(sprintf("Weighted Average:    %.2f%%\n", mean(recent_comparison$Weighted_Avg)))
+cat(sprintf("Difference:          +%.2f percentage points\n", 
+            mean(recent_comparison$Weighted_Avg) - mean(recent_comparison$Unweighted_Avg)))
