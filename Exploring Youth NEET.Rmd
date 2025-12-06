@@ -1,0 +1,208 @@
+---
+title: "Exploring Youth NEET"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-12-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+#Setting the working directory, loading all necessary libraries and data
+
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(tidyverse)
+library(dplyr)
+
+setwd("~/Desktop/Uni/Intro to Data Science/Group project")
+
+youth_neet <- read_csv("data sets/Youth_not_in_education_employment_training_with_continent.csv")
+```
+
+```{r}
+head(youth_neet)
+```
+
+```{r}
+avg_NEET_by_continent_year <- youth_neet %>%
+  group_by(Continent, Year) %>%
+  summarise(
+    avg_NEET = mean(Share.of.youth.not.in.education..employment.or.training..total....of.youth.population., 
+                    na.rm = TRUE)
+  )
+
+head(avg_NEET_by_continent_year)
+```
+
+```{r}
+youth_neet2 <- read_csv("data sets/Youth_neet_final.csv")
+
+head(youth_neet2)
+
+```
+
+
+```{r}
+colnames(youth_neet2)
+```
+
+```{r}
+youth_neet2 <- youth_neet2 %>% 
+  rename(
+    NEET = "Share.of.youth.not.in.education..employment.or.training..total....of.youth.population.",
+    population = "pop_15_24"
+  )
+head(youth_neet2)
+```
+
+```{r}
+continent_summary <- youth_neet2 %>%
+  filter(!is.na(Continent), !is.na(NEET)) %>%
+  group_by(Continent) %>%
+  summarise(
+    mean_neet     = mean(NEET, na.rm = TRUE),
+    median_neet   = median(NEET, na.rm = TRUE),
+    min_neet      = min(NEET, na.rm = TRUE),
+    max_neet      = max(NEET, na.rm = TRUE),
+    sd_neet       = sd(NEET, na.rm = TRUE),
+    iqr_neet      = IQR(NEET, na.rm = TRUE),
+    n_countries   = n_distinct(Entity),
+    weighted_mean = sum(NEET * population, na.rm = TRUE) /
+                    sum(population, na.rm = TRUE)
+  )
+continent_summary
+```
+
+
+
+```{r}
+# Boxplot of Neet by continent
+ggplot(youth_neet2 %>% filter(!is.na(Continent)),
+       aes(x = Continent, y = NEET, fill = Continent)) +
+  geom_boxplot() +
+  labs(
+    title = "Distribution of NEET Rates by Continent",
+    x = "Continent",
+    y = "NEET (% of youth 15–24)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+```
+
+```{r}
+
+neet_weighted <- youth_neet2 %>% 
+  group_by(Continent, Year) %>% 
+  summarise(
+    weighted_NEET = weighted.mean(NEET, population, na.rm = TRUE),
+    total_population = sum(population, na.rm = TRUE),
+  )
+
+neet_weighted
+```
+
+
+```{r}
+colnames(youth_neet2)
+```
+
+
+```{r}
+neet_plot_data <- avg_NEET_by_continent_year %>%
+  filter(Year >= 2015, Year <= 2020) %>%
+  filter(!is.na(Continent))   # <-- Remove NA continent
+
+ggplot(neet_plot_data, aes(x = Year, y = avg_NEET, color = Continent)) +
+  geom_line(size = 1) +
+  geom_point(size = 0.5) +
+  labs(
+    title = "Average NEET Rate by Continent (2015–2020)",
+    x = "Year",
+    y = "Average NEET (% of youth 15–24)",
+    color = "Continent"
+  ) +
+  theme_minimal()
+```
+
+
+
+```{r}
+
+ggplot(neet_weighted %>% filter(Year >= 2015, Year <= 2020) %>%
+  filter(!is.na(Continent)) ,
+       aes(x = Year, y = weighted_NEET, color = Continent)) +
+  geom_line(size = 1) +
+  labs(
+    title = "Weighted Average NEET Rate Over Time by Continent (2015–2020)",
+    x = "Year",
+    y = "Average NEET (%)"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+neet_change_continent <- avg_NEET_by_continent_year %>%
+  filter(!is.na(Continent), 
+         Year >= 2010, Year <= 2020) %>%          # keep only 2010–2020
+  group_by(Continent) %>%
+  summarise(
+    avg_2010_2015 = mean(avg_NEET[Year >= 2010 & Year <= 2015], na.rm = TRUE),
+    neet_2020 = avg_NEET[Year == 2020][1],   # NEET value in 2020
+    .groups = "drop"
+  ) %>%
+  mutate(
+    percentage_point_change = neet_2020 -avg_2010_2015
+  )
+
+head(neet_change_continent)
+```
+
+```{r}
+# Load world map as an sf object
+world <- ne_countries(scale = "medium", returnclass = "sf") %>%
+  select(name, continent, geometry)
+
+# Keep only the 6 continents we care about
+world <- world %>%
+  filter(continent %in% c("Africa", "Asia", "Europe",
+                          "North America", "South America", "Oceania"))
+
+# Join NEET % change data to every country by continent
+world_neet <- world %>%
+  left_join(neet_change_continent,
+            by = c("continent" = "Continent"))
+```
+
+
+```{r}
+ggplot(world_neet) +
+  geom_sf(aes(fill = percentage_point_change), color = "grey30", size = 0.1) +
+  scale_fill_gradient2(
+    low = "steelblue",
+    mid = "white",
+    high = "firebrick",
+    midpoint = 0,
+    name = "Percentage \nPoint Difference"
+  ) +
+  labs(
+    title = "Percentage Point Difference in Average NEET Rates (2015–2020)",
+    subtitle = "Colour shows change by continent and "
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_blank(),
+    panel.grid = element_blank()
+  )
+```
+
