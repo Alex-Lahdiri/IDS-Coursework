@@ -197,7 +197,7 @@ ggplot(world_neet) +
   ) +
   labs(
     title = "Percentage Point Difference in Average NEET Rates (2015–2020)",
-    subtitle = "Colour shows change by continent and "
+    subtitle = "Colour shows change in continental averages"
   ) +
   theme_minimal() +
   theme(
