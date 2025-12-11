@@ -1,0 +1,821 @@
+---
+title: "Data Science Coursework Code"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-12-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Core data wrangling & plotting
+
+library(tidyverse)   # includes dplyr, ggplot2, readr, tidyr, stringr, forcats, etc.
+library(ggridges)
+library(scales)
+
+# Extra helpers for factors & layout
+
+library(forcats)
+library(patchwork)
+library(gridExtra)
+library(grid)
+
+# Maps / spatial / interactive
+
+library(plotly)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+library(htmlwidgets)   # for saving plotly maps
+
+# Common ggplot theme for SDG-style plots
+
+theme_sdg <- theme_minimal(base_size = 13) +
+theme(
+plot.title.position = "plot",
+plot.title   = element_text(hjust = 0.5, face = "bold"),
+plot.subtitle= element_text(hjust = 0.5, margin = margin(b = 8)),
+plot.margin  = margin(t = 20, r = 15, b = 25, l = 15),
+legend.position = "bottom",
+legend.margin   = margin(t = 3, b = 3),
+legend.box.margin = margin(t = 3, b = 3)
+)
+```
+
+```{r}
+# CSVs must be in the working directory of this script
+
+continents <- read_csv("continents-according-to-our-world-in-data.csv")
+gdp_pc     <- read_csv("gdp-per-capita-worldbank.csv")
+extra      <- read_csv("devstatus_population_gdp.csv")
+
+# Continents: one row per ISO3 code with its continent
+
+continents_clean <- continents %>%
+select(Code, Continent) %>%
+distinct()
+
+# GDP per capita (PPP, constant 2017 international $)
+
+gdp_pc_clean <- gdp_pc %>%
+rename(gdp_pc = `GDP per capita, PPP (constant 2017 international $)`) %>%
+filter(!is.na(Code))
+
+# Extra: population, dev_status, LDC proxy, total GDP (PPP 2021$)
+
+extra_clean <- extra %>%
+mutate(
+Year = as.integer(Year)
+) %>%
+rename(
+gdp_level = `GDP, PPP (constant 2021 international $)`
+)
+
+# Master panel: GDP per capita + continent + extra (by Code & Year)
+
+panel <- gdp_pc_clean %>%
+left_join(continents_clean, by = "Code") %>%
+left_join(extra_clean,     by = c("Code", "Year")) %>%
+
+# Keep only the six inhabited continents
+
+filter(Continent %in% c("Africa", "Asia", "Europe",
+"North America", "South America", "Oceania")) %>%
+mutate(
+gdp_pc    = as.numeric(gdp_pc),
+gdp_level = as.numeric(gdp_level)
+)
+
+# Rebuild a single Entity column after joins
+
+panel <- panel %>%
+mutate(
+Entity = dplyr::coalesce(.data$Entity.x, .data$Entity.y)
+) %>%
+select(-any_of(c("Entity.x", "Entity.y")))
+
+```
+
+```{r}
+# Compute per-capita growth (log-difference * 100 = % growth)
+
+panel_pc <- panel %>%
+arrange(Code, Year) %>%
+group_by(Code) %>%
+mutate(
+log_gdp_pc    = log(gdp_pc),
+growth_pc_pct = 100 * (log_gdp_pc - lag(log_gdp_pc))
+) %>%
+ungroup()
+
+# Keep observations with dev_status and growth available
+
+panel_dev_pc <- panel_pc %>%
+filter(
+!is.na(dev_status),
+!is.na(growth_pc_pct)
+)
+
+# Rename LDC proxy label and order factor levels
+
+panel_dev_pc <- panel_dev_pc %>%
+mutate(
+dev_status = fct_recode(
+dev_status,
+"Low-income (LDC)" = "LDC_proxy"
+),
+dev_status = fct_relevel(
+dev_status,
+"Low-income (LDC)", "Lower-middle", "Upper-middle", "High-income (HDC)"
+)
+)
+
+# National-circumstances per-capita growth targets (%)
+
+dev_target_pc <- c(
+"High-income (HDC)" = 2,
+"Upper-middle"      = 4,
+"Lower-middle"      = 5,
+"Low-income (LDC)"  = 7
+)
+
+# Flag whether countries meet their group-specific target or ≥7% benchmark
+
+panel_dev_pc <- panel_dev_pc %>%
+mutate(
+target_pc          = dev_target_pc[as.character(dev_status)],
+meets_7_pc         = growth_pc_pct >= 7,
+meets_group_target = growth_pc_pct >= target_pc
+)
+
+# Population-weighted summaries by development status & year
+
+dev_status_summary_pc <- panel_dev_pc %>%
+group_by(dev_status, Year) %>%
+summarise(
+total_pop              = sum(pop_total, na.rm = TRUE),
+growth_pw_pc           = sum(growth_pc_pct * pop_total, na.rm = TRUE) / total_pop,
+share_pop_meets_7      = sum(pop_total[meets_7_pc], na.rm = TRUE) / total_pop,
+share_pop_meets_target = sum(pop_total[meets_group_target], na.rm = TRUE) / total_pop,
+target_pc              = first(target_pc),
+n_countries            = n_distinct(Code),
+.groups = "drop"
+)
+
+dev_status_summary_pc_1990_2021 <- dev_status_summary_pc %>%
+filter(Year >= 1990, Year <= 2021)
+
+# Colour palette for development statuses
+
+dev_status_palette <- c(
+"Low-income (LDC)" = "#1b9e77",
+"Lower-middle"     = "#d95f02",
+"Upper-middle"     = "#7570b3",
+"High-income (HDC)"= "#e7298a"
+)
+```
+
+```{r}
+# Line: population-weighted GDP per capita growth over time
+
+plot_A_line_growth <- ggplot(
+dev_status_summary_pc_1990_2021,
+aes(x = Year, y = growth_pw_pc, colour = dev_status)
+) +
+geom_line(linewidth = 1.2) +
+scale_colour_manual(values = dev_status_palette, name = "Development status") +
+labs(
+title = "Population-weighted GDP per Capita Growth by Development Status",
+y = "GDP per Capita Growth (%)",
+x = "Year"
+) +
+theme_sdg
+
+plot_A_line_growth
+```
+
+```{r}
+# Line: share of population meeting group-specific per capita targets
+
+plot_A_line_share <- ggplot(
+dev_status_summary_pc_1990_2021,
+aes(x = Year, y = share_pop_meets_target, colour = dev_status)
+) +
+geom_line(linewidth = 1.2) +
+scale_colour_manual(values = dev_status_palette, name = "Development status") +
+scale_y_continuous(labels = percent_format(accuracy = 1)) +
+labs(
+title = "Share of Population Meeting Group-specific Per Capita Growth Targets",
+y = "Share of population (%)",
+x = "Year"
+) +
+theme_sdg
+
+plot_A_line_share
+```
+
+```{r}
+# Boxplot: per-capita growth distribution by development status
+
+plot_A_box <- panel_dev_pc %>%
+ggplot(aes(x = dev_status, y = growth_pc_pct, fill = dev_status)) +
+geom_boxplot(alpha = 0.9, outlier.shape = 16, outlier.size = 1.5) +
+scale_fill_manual(values = dev_status_palette, guide = "none") +
+labs(
+title = "GDP per Capita Growth Distribution by Development Status",
+y = "GDP per Capita Growth (%)",
+x = "Development status"
+) +
+theme_sdg +
+theme(axis.text.x = element_text(angle = 20, hjust = 1))
+
+plot_A_box
+```
+
+```{r}
+# Ridgeline: distribution of per-capita growth by development status
+
+plot_A_ridge <- panel_dev_pc %>%
+filter(!is.na(growth_pc_pct)) %>%
+ggplot(aes(
+x = growth_pc_pct,
+y = fct_rev(dev_status),
+fill = dev_status
+)) +
+geom_density_ridges(scale = 0.9, alpha = 0.85) +
+scale_fill_manual(values = dev_status_palette, guide = "none") +
+labs(
+title = "Distribution of GDP per Capita Growth by Development Status",
+x = "GDP per Capita Growth (%)",
+y = "Development status"
+) +
+theme_sdg +
+theme(panel.spacing = unit(1.2, "lines"))
+
+plot_A_ridge
+```
+
+```{r}
+# LDC-only panel with total GDP (not per capita) growth
+
+panel_ldc_gdp <- panel %>%
+filter(
+is_ldc_proxy == 1,
+!is.na(pop_total),
+!is.na(gdp_level)
+) %>%
+arrange(Code, Year) %>%
+group_by(Code) %>%
+mutate(
+log_gdp        = log(gdp_level),
+growth_gdp_pct = 100 * (log_gdp - lag(log_gdp)),   # total GDP growth (%)
+meets_7_gdp    = growth_gdp_pct >= 7
+) %>%
+ungroup() %>%
+filter(!is.na(growth_gdp_pct))
+
+# Continent-level LDC summaries
+
+continent_ldc_gdp_summary <- panel_ldc_gdp %>%
+group_by(Continent, Year) %>%
+summarise(
+total_pop          = sum(pop_total, na.rm = TRUE),
+growth_pw_gdp      = sum(growth_gdp_pct * pop_total, na.rm = TRUE) / total_pop,
+share_pop_meets_7g = sum(pop_total[meets_7_gdp], na.rm = TRUE) / total_pop,
+n_ldc_countries    = n_distinct(Code),
+.groups = "drop"
+)
+
+continent_ldc_gdp_1990_2021 <- continent_ldc_gdp_summary %>%
+filter(Year >= 1990, Year <= 2021)
+
+# Colour palette for continents
+
+continent_palette <- c(
+"Africa"        = "#1b9e77",
+"Asia"          = "#d95f02",
+"Europe"        = "#7570b3",
+"North America" = "#e7298a",
+"South America" = "#66a61e",
+"Oceania"       = "#e6ab02"
+)
+```
+
+```{r}
+# Line: population-weighted total GDP growth in LDCs by continent
+
+plot_B_line_growth <- ggplot(
+continent_ldc_gdp_1990_2021,
+aes(x = Year, y = growth_pw_gdp, colour = Continent)
+) +
+geom_line(linewidth = 1.2) +
+geom_hline(yintercept = 7, linetype = "dashed", color = "black") +   # SDG 7% target
+scale_colour_manual(values = continent_palette) +
+labs(
+title = "Population-weighted Total GDP Growth in LDCs by Continent",
+subtitle = "Dashed line indicates SDG target of 7% total GDP growth",
+y = "Total GDP Growth (%)",
+x = "Year",
+colour = "Continent"
+) +
+theme_sdg
+
+plot_B_line_growth
+```
+
+```{r}
+# Line: share of LDC population with ≥7% total GDP growth
+
+plot_B_line_share <- ggplot(
+continent_ldc_gdp_1990_2021,
+aes(x = Year, y = share_pop_meets_7g, colour = Continent)
+) +
+geom_line(linewidth = 1.2) +
+scale_colour_manual(values = continent_palette) +
+scale_y_continuous(labels = percent_format(accuracy = 1)) +
+labs(
+title = "Share of LDC Population in Countries with ≥7% Total GDP Growth",
+subtitle = "LDCs only; threshold reflects SDG target",
+y = "Share of LDC population (%)",
+x = "Year",
+colour = "Continent"
+) +
+theme_sdg
+
+plot_B_line_share
+```
+
+```{r}
+# Boxplot: total GDP growth for LDCs by continent
+
+plot_B_box <- panel_ldc_gdp %>%
+ggplot(aes(x = Continent, y = growth_gdp_pct, fill = Continent)) +
+geom_boxplot(alpha = 0.9, outlier.shape = 16, outlier.size = 1.5) +
+geom_hline(yintercept = 7, linetype = "dashed", color = "black") +   # SDG 7% target
+scale_fill_manual(values = continent_palette, guide = "none") +
+labs(
+title = "Total GDP Growth Distribution by Continent (LDCs)",
+subtitle = "Dashed line indicates SDG target of 7% total GDP growth",
+y = "Total GDP Growth (%)",
+x = "Continent"
+) +
+theme_sdg
+
+plot_B_box
+```
+
+```{r}
+# Ridgeline: distribution of total GDP growth for LDCs by continent
+
+plot_B_ridge <- panel_ldc_gdp %>%
+filter(!is.na(growth_gdp_pct)) %>%
+ggplot(aes(
+x = growth_gdp_pct,
+y = fct_rev(factor(Continent)),
+fill = Continent
+)) +
+geom_density_ridges(scale = 0.9, alpha = 0.85) +
+geom_vline(xintercept = 7, linetype = "dashed", color = "black") +   # SDG 7% target
+scale_fill_manual(values = continent_palette, guide = "none") +
+labs(
+title = "Distribution of Total GDP Growth by Continent (LDCs)",
+subtitle = "Dashed line marks SDG target of 7% total GDP growth",
+x = "Total GDP Growth (%)",
+y = "Continent"
+) +
+theme_sdg +
+theme(panel.spacing = unit(1.2, "lines"))
+
+plot_B_ridge
+```
+
+```{r}
+# World ISO list (no geometry)
+
+world_iso <- rnaturalearth::ne_countries(scale = "small", returnclass = "sf") %>%
+transmute(
+Code = toupper(trimws(iso_a3)),   # ISO3 directly from shapefile
+Entity_world = name
+) %>%
+st_drop_geometry() %>%
+distinct(Code, .keep_all = TRUE)
+
+# Manual fixes for specific codes
+
+world_iso_manual <- tibble::tribble(
+~Code,      ~Entity_world,
+"FRA",      "France",
+"NOR",      "Norway",
+"OWID_KOS", "Kosovo"
+)
+
+world_iso <- world_iso %>%
+dplyr::filter(!Code %in% world_iso_manual$Code) %>%
+dplyr::bind_rows(world_iso_manual)
+```
+
+```{r}
+years_pc <- sort(unique(panel_dev_pc$Year))
+
+# Full grid of (country, year) to display even missing data as "No data"
+
+world_year_full <- expand.grid(
+Code = world_iso$Code,
+Year = years_pc,
+stringsAsFactors = FALSE
+) %>%
+left_join(world_iso, by = "Code")
+
+# Status info from panel_dev_pc
+
+pc_status_raw <- panel_dev_pc %>%
+transmute(
+Code,
+Year,
+dev_status,
+meets_group_target,
+Entity_data = Entity
+)
+
+world_pc_status <- world_year_full %>%
+left_join(pc_status_raw, by = c("Code", "Year")) %>%
+mutate(
+country_name = coalesce(Entity_data, Entity_world),
+status_lab = case_when(
+is.na(meets_group_target)      ~ "No data",
+meets_group_target             ~ "Meets group target",
+TRUE                           ~ "Below group target"
+),
+status_num = case_when(
+status_lab == "Meets group target"  ~ 1,
+status_lab == "Below group target"  ~ 0,
+TRUE                                ~ -1   # No data
+),
+hover_text = paste0(
+country_name, " (", Code, ")<br>",
+"Year: ", Year, "<br>",
+"Development group: ", dev_status, "<br>",
+"Status: ", status_lab
+)
+)
+
+# Interactive map: per-capita targets
+
+fig_pc <- plot_ly(
+data = world_pc_status,
+type = "choropleth",
+locations = ~Code,
+locationmode = "ISO-3",
+z = ~status_num,
+frame = ~Year,
+hovertext = ~hover_text,
+hoverinfo = "text",
+colorscale = list(
+list(0,   "rgb(200,200,200)"),  # No data → grey
+list(0.33,"rgb(200,200,200)"),
+list(0.34,"rgb(217,95,2)"),     # Below target → orange
+list(0.66,"rgb(217,95,2)"),
+list(0.67,"rgb(27,158,119)"),   # Meets target → green
+list(1,   "rgb(27,158,119)")
+),
+colorbar = list(
+title = "Status",
+tickvals = c(-1, 0, 1),
+ticktext = c("No data", "Below group target", "Meets group target")
+)
+) %>%
+layout(
+title = list(
+text = "Countries Meeting Income-group Per Capita Growth Targets",
+x = 0.5,
+xanchor = "center",
+y = 0.95
+),
+margin = list(
+t = 80,
+b = 40,
+l = 40,
+r = 40
+),
+geo = list(
+showframe = FALSE,
+showcoastlines = FALSE,
+projection = list(type = "equirectangular")
+)
+)
+
+fig_pc
+```
+
+```{r}
+years_ldc <- sort(unique(panel_ldc_gdp$Year))
+
+world_year_full_ldc <- expand.grid(
+Code = world_iso$Code,
+Year = years_ldc,
+stringsAsFactors = FALSE
+) %>%
+left_join(world_iso, by = "Code")
+
+ldc_status_raw <- panel_ldc_gdp %>%
+transmute(
+Code,
+Year,
+is_ldc_proxy,
+meets_7_gdp,
+Entity_data = Entity
+)
+
+world_ldc_status <- world_year_full_ldc %>%
+left_join(ldc_status_raw, by = c("Code", "Year")) %>%
+mutate(
+country_name = coalesce(Entity_data, Entity_world),
+# Use same wording as the per-capita map legend
+status_lab = case_when(
+is_ldc_proxy == 1 & meets_7_gdp == TRUE  ~ "Meets group target",
+is_ldc_proxy == 1 & meets_7_gdp == FALSE ~ "Below group target",
+TRUE                                     ~ "No data"
+),
+status_num = case_when(
+status_lab == "No data"            ~ -1,
+status_lab == "Below group target" ~ 0,
+status_lab == "Meets group target" ~ 1
+),
+hover_text = paste0(
+country_name, " (", Code, ")<br>",
+"Year: ", Year, "<br>",
+"Status: ", status_lab
+)
+)
+
+# Interactive map: LDCs and 7% total GDP target
+
+fig_ldc <- plot_ly(
+data = world_ldc_status,
+type = "choropleth",
+locations = ~Code,
+locationmode = "ISO-3",
+z = ~status_num,
+frame = ~Year,
+hovertext = ~hover_text,
+hoverinfo = "text",
+colorscale = list(
+list(0,   "rgb(200,200,200)"), # No data / non-LDC → grey
+list(0.33,"rgb(200,200,200)"),
+list(0.34,"rgb(217,95,2)"),    # Below target → orange
+list(0.66,"rgb(217,95,2)"),
+list(0.67,"rgb(27,158,119)"),  # Meets target → green
+list(1,   "rgb(27,158,119)")
+),
+colorbar = list(
+title = "Status",
+tickvals = c(-1, 0, 1),
+ticktext = c("No data", "Below group target", "Meets group target")
+)
+) %>%
+layout(
+title = list(
+text = "LDCs Meeting the 7% Total GDP Growth Target",
+x = 0.5,
+xanchor = "center",
+y = 0.95
+),
+margin = list(
+t = 80,
+b = 40,
+l = 40,
+r = 40
+),
+geo = list(
+showframe = FALSE,
+showcoastlines = FALSE,
+projection = list(type = "equirectangular")
+)
+)
+
+fig_ldc
+```
+
+```{r}
+# Load raw NEET dataset
+
+youth_neet <- read_csv("youth-not-in-education-employment-training.csv")
+```
+
+```{r}
+# Join dev-status / population data and continents
+
+youth_neet <- youth_neet %>%
+left_join(extra,      by = c("Entity", "Code", "Year")) %>%
+left_join(continents, by = "Code") %>%
+
+# Rename NEET share and population 15–24
+
+rename(
+NEET       = `Share of youth not in education, employment or training, total (% of youth population)`,
+population = pop_15_24
+)
+
+# Data names fixes + cleaning
+
+youth_neet <- youth_neet %>%
+  rename(Year = Year.x)
+
+# Make a cleaner version of youth_neet with a single Entity and Year
+
+youth_neet_clean <- youth_neet %>%
+  mutate(
+    Entity = dplyr::coalesce(Entity.x, Entity.y),
+    Year   = as.integer(Year)
+  ) %>%
+  select(
+    Entity, Code, Year, Continent,
+    NEET, population,
+    pop_total, pop_0_4, pop_5_14, pop_25_64, pop_65plus,
+    wb_income_class, dev_status, is_ldc_proxy,
+    `GDP, PPP (constant 2021 international $)`
+  )
+
+avg_NEET_by_continent_year <- youth_neet %>%
+  filter(!is.na(Continent)) %>%
+  group_by(Continent, Year) %>%
+  summarise(
+    avg_NEET = mean(NEET, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r}
+# Summary NEET stats by continent
+
+continent_summary <- youth_neet %>%
+filter(!is.na(Continent), !is.na(NEET)) %>%
+group_by(Continent) %>%
+summarise(
+mean_neet      = mean(NEET, na.rm = TRUE),
+weighted_mean  = sum(NEET * population, na.rm = TRUE) /
+sum(population, na.rm = TRUE),
+median_neet    = median(NEET, na.rm = TRUE),
+min_neet       = min(NEET, na.rm = TRUE),
+max_neet       = max(NEET, na.rm = TRUE),
+sd_neet        = sd(NEET, na.rm = TRUE),
+iqr_neet       = IQR(NEET, na.rm = TRUE),
+.groups = "drop"
+)
+
+continent_summary
+```
+
+```{r}
+# Boxplot: NEET by continent for 2014 & 2015
+
+youth_neet %>%
+dplyr::filter(!is.na(Continent), Year %in% c(2014, 2015)) %>%
+ggplot(aes(x = Continent, y = NEET, fill = Continent)) +
+geom_boxplot() +
+labs(
+title = "Distribution of NEET Rates by Continent (2014–2015)",
+x = "Continent",
+y = "NEET (% of youth 15–24)"
+) +
+theme_minimal() +
+theme(
+legend.position = "none",
+plot.title = element_text(hjust = 0.5, face = "bold")
+)
+```
+
+```{r}
+# Boxplot: NEET by continent for 2020
+
+youth_neet %>%
+filter(!is.na(Continent), Year == 2020) %>%
+ggplot(aes(x = Continent, y = NEET, fill = Continent)) +
+geom_boxplot() +
+labs(
+title = "Distribution of NEET Rates by Continent (2020)",
+x = "Continent",
+y = "NEET (% of youth 15–24)"
+) +
+theme_minimal() +
+theme(
+legend.position = "none",
+plot.title = element_text(hjust = 0.5, face = "bold")
+)
+```
+```{r}
+# Line: average NEET by continent, 2015–2020
+
+neet_plot_data <- avg_NEET_by_continent_year %>%
+  filter(Year >= 2015, Year <= 2020) %>%
+    filter(!is.na(Continent))
+ggplot(neet_plot_data, aes(x = Year, y = avg_NEET, color = Continent)) +
+  geom_line(size = 1) +
+  geom_point(size = 0.5) +
+  labs(
+    title = "Average NEET Rate by Continent (2015–2020)",
+    x = "Year",
+    y = "Average NEET (% of youth 15–24)",
+    color = "Continent"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Population-weighted NEET by continent & year
+
+neet_weighted <- youth_neet %>%
+dplyr::filter(!is.na(Continent)) %>%
+dplyr::group_by(Continent, Year) %>%
+dplyr::summarise(
+total_pop = sum(population, na.rm = TRUE),
+weighted_NEET = ifelse(
+total_pop == 0 | is.na(total_pop),
+NA_real_,
+sum(NEET * population, na.rm = TRUE) / total_pop
+),
+.groups = "drop"
+)
+
+neet_plot_data <- neet_weighted %>%
+dplyr::filter(
+Year >= 2015, Year <= 2020,
+!is.na(Continent),
+!is.na(weighted_NEET),
+is.finite(weighted_NEET)
+)
+
+ggplot(neet_plot_data,
+aes(x = Year, y = weighted_NEET, color = Continent)) +
+geom_line(size = 1) +
+labs(
+title = "Weighted Average NEET Rate Over Time by Continent (2015–2020)",
+x = "Year",
+y = "Average NEET (%)"
+) +
+theme_minimal()
+```
+
+```{r}
+# Percentage point change: 2010–2015 average vs 2020
+
+neet_change_continent <- avg_NEET_by_continent_year %>%
+filter(!is.na(Continent), Year >= 2010, Year <= 2020) %>%
+group_by(Continent) %>%
+summarise(
+avg_2010_2015 = mean(avg_NEET[Year >= 2010 & Year <= 2015], na.rm = TRUE),
+neet_2020     = avg_NEET[Year == 2020][1],
+.groups       = "drop"
+) %>%
+mutate(
+percentage_point_change = neet_2020 - avg_2010_2015
+)
+
+neet_change_continent
+```
+
+```{r}
+# Load world map as a simple features object
+
+world <- ne_countries(scale = "medium", returnclass = "sf") %>%
+select(name, continent, geometry)
+
+# Keep only the 6 main continents
+
+world <- world %>%
+filter(continent %in% c("Africa", "Asia", "Europe",
+"North America", "South America", "Oceania"))
+
+# Join NEET percentage-point change to each country by continent
+
+world_neet <- world %>%
+left_join(neet_change_continent,
+by = c("continent" = "Continent"))
+```
+
+```{r}
+# Plot: percentage point difference in NEET rates by continent on world map
+
+ggplot(world_neet) +
+geom_sf(aes(fill = percentage_point_change),
+color = "grey30", size = 0.1) +
+scale_fill_gradient2(
+low = "lightgreen",
+mid = "lightyellow",
+high = "red",
+midpoint = 0,
+name = "Percentage \nPoint Difference"
+) +
+labs(
+title = "Percentage Point Difference in Average NEET Rates (2015–2020)",
+subtitle = "Colour shows change in continental averages"
+) +
+theme_minimal() +
+theme(
+axis.text = element_blank()
+)
+```
